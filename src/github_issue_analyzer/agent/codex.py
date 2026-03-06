@@ -8,6 +8,7 @@ from pathlib import Path
 from pydantic import TypeAdapter
 
 from github_issue_analyzer.agent.base import AgentAdapter
+from github_issue_analyzer.branding import BOT_NAME
 from github_issue_analyzer.models import AgentRequest, AgentResponse
 
 
@@ -75,7 +76,7 @@ class CodexAdapter(AgentAdapter):
             f"- {line}" for line in request.clarification_answers
         )
         return f"""
-You are the backend analysis agent for GitHub Issue Analyzer.
+You are the backend analysis agent for {BOT_NAME}.
 
 Read the local repository in a strictly read-only way.
 Do not modify files.

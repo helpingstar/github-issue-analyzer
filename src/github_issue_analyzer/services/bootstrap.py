@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from github_issue_analyzer.branding import BOT_NAME
 from github_issue_analyzer.db import StateStore
 from github_issue_analyzer.github.client import GitHubClient
 from github_issue_analyzer.models import FileConfig, RepoConfig
@@ -65,7 +66,7 @@ class BootstrapService:
         trigger_label = repo.resolved_trigger_label(self.file_config.defaults)
         label_specs = dict(BOOTSTRAP_LABEL_SPECS)
         if trigger_label not in label_specs:
-            label_specs[trigger_label] = ("1d76db", "Issue Analyzer trigger label")
+            label_specs[trigger_label] = ("1d76db", f"{BOT_NAME} trigger label")
 
         for name, (color, description) in label_specs.items():
             if name in existing:

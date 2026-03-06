@@ -6,6 +6,7 @@ from urllib.parse import quote
 
 import httpx
 
+from github_issue_analyzer.branding import BOT_NAME
 from github_issue_analyzer.github.auth import GitHubAppAuth
 
 
@@ -18,7 +19,7 @@ class GitHubClient:
             headers={
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": "2022-11-28",
-                "User-Agent": "github-issue-analyzer",
+                "User-Agent": BOT_NAME,
             },
             timeout=30.0,
         )

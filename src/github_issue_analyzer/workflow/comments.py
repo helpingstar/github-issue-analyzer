@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from github_issue_analyzer.branding import BOT_NAME
 from github_issue_analyzer.models import EstimateResult, QuestionSpec, WorkflowState
 
 
@@ -23,15 +24,15 @@ CONFIDENCE_LABELS = {
 }
 
 BOOTSTRAP_LABEL_SPECS = {
-    "ai:analyze": ("1d76db", "Issue Analyzer trigger label"),
-    "ai:needs-clarification": ("fbca04", "Analyzer needs more detail"),
-    "ai:ready-for-estimate": ("0e8a16", "Analyzer has enough detail to estimate"),
-    "ai:estimating": ("5319e7", "Analyzer is running estimate"),
-    "ai:estimated": ("0052cc", "Analyzer posted an estimate"),
-    "ai:stale": ("b60205", "Analyzer estimate is stale"),
-    "ai:refreshing": ("c5def5", "Analyzer is refreshing"),
-    "ai:stopped": ("6a737d", "Analyzer workflow was stopped"),
-    "ai:error": ("d93f0b", "Analyzer encountered an error"),
+    "ai:analyze": ("1d76db", f"{BOT_NAME} trigger label"),
+    "ai:needs-clarification": ("fbca04", f"{BOT_NAME} needs more detail"),
+    "ai:ready-for-estimate": ("0e8a16", f"{BOT_NAME} has enough detail to estimate"),
+    "ai:estimating": ("5319e7", f"{BOT_NAME} is running estimate"),
+    "ai:estimated": ("0052cc", f"{BOT_NAME} posted an estimate"),
+    "ai:stale": ("b60205", f"{BOT_NAME} estimate is stale"),
+    "ai:refreshing": ("c5def5", f"{BOT_NAME} is refreshing"),
+    "ai:stopped": ("6a737d", f"{BOT_NAME} workflow was stopped"),
+    "ai:error": ("d93f0b", f"{BOT_NAME} encountered an error"),
     "ai:confidence:low": ("f9d0c4", "Low confidence estimate"),
     "ai:confidence:medium": ("fef2c0", "Medium confidence estimate"),
     "ai:confidence:high": ("c2e0c6", "High confidence estimate"),
@@ -42,7 +43,7 @@ def render_clarification_comment(
     missing_slots: list[str], question_specs: list[QuestionSpec], round_number: int
 ) -> str:
     lines = [
-        "[Issue Analyzer]",
+        f"[{BOT_NAME}]",
         "",
         f"현재 부족한 항목: {', '.join(missing_slots)}",
         "아래 체크리스트를 직접 수정해 답변해 주세요.",
@@ -83,7 +84,7 @@ def render_estimate_comment(base_branch: str, estimate: EstimateResult) -> str:
     now = datetime.now(UTC).isoformat()
     return "\n".join(
         [
-            "[Issue Analyzer]",
+            f"[{BOT_NAME}]",
             "",
             f"- 분석 시각: `{now}`",
             f"- 기준 브랜치: `{base_branch}`",
@@ -105,7 +106,7 @@ def render_estimate_comment(base_branch: str, estimate: EstimateResult) -> str:
 
 def render_stale_comment(previous_commit: str, current_commit: str, matched_files: list[str]) -> str:
     lines = [
-        "[Issue Analyzer]",
+        f"[{BOT_NAME}]",
         "",
         "이전 추정이 stale 상태로 전환되었습니다.",
         f"- 이전 기준 커밋: `{previous_commit}`",
@@ -121,7 +122,7 @@ def render_stale_comment(previous_commit: str, current_commit: str, matched_file
 def render_requirements_changed_comment() -> str:
     return "\n".join(
         [
-            "[Issue Analyzer]",
+            f"[{BOT_NAME}]",
             "",
             "기존 추정 이후 요구사항 변경이 감지되어 상태를 `needs-clarification`으로 되돌렸습니다.",
             "필요하면 내용을 보완한 뒤 `/refresh` 로 전체 재평가를 다시 실행해 주세요.",
@@ -132,7 +133,7 @@ def render_requirements_changed_comment() -> str:
 def render_error_comment(error_message: str) -> str:
     return "\n".join(
         [
-            "[Issue Analyzer]",
+            f"[{BOT_NAME}]",
             "",
             "처리 중 오류가 발생했습니다.",
             f"- 오류: `{error_message}`",

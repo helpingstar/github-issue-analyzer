@@ -6,6 +6,7 @@ from pathlib import Path
 import typer
 
 from github_issue_analyzer.agent.factory import build_agent_adapter
+from github_issue_analyzer.branding import BOT_NAME
 from github_issue_analyzer.config import load_configuration
 from github_issue_analyzer.db import StateStore
 from github_issue_analyzer.github.auth import GitHubAppAuth
@@ -19,7 +20,7 @@ from github_issue_analyzer.services.worker import WorkerService
 from github_issue_analyzer.workflow.service import WorkflowService
 
 
-app = typer.Typer(help="GitHub Issue Analyzer")
+app = typer.Typer(help=BOT_NAME)
 
 
 def _project_root() -> Path:

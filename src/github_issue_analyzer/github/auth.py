@@ -7,6 +7,8 @@ from pathlib import Path
 import httpx
 import jwt
 
+from github_issue_analyzer.branding import BOT_NAME
+
 
 @dataclass
 class InstallationToken:
@@ -26,7 +28,7 @@ class GitHubAppAuth:
             headers={
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": "2022-11-28",
-                "User-Agent": "github-issue-analyzer",
+                "User-Agent": BOT_NAME,
             },
             timeout=30.0,
         )

@@ -1,4 +1,4 @@
-"""GitHub Issue Analyzer."""
+"""GitHub Issue Analyzer package."""
 
 __all__ = ["__version__"]
 

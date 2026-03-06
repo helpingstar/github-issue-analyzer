@@ -1,4 +1,4 @@
-# GitHub Issue Analyzer 기획문서
+# your-issue-is-unclear 기획문서
 
 - 작성일: 2026-03-06
 - 문서 상태: 설계 확정안
@@ -9,7 +9,7 @@
 
 ## 1. 프로젝트 개요
 
-GitHub Issue Analyzer는 GitHub Issue를 읽고, 요구사항이 모호하면 질문으로 구체화한 뒤, 로컬 Agent CLI가 실제 코드베이스를 읽어 예상 작업량을 line 단위 범위로 추정하고, 그 결과를 GitHub 댓글과 라벨에 반영하는 Python 프로그램이다.
+`your-issue-is-unclear`는 GitHub Issue를 읽고, 요구사항이 모호하면 질문으로 구체화한 뒤, 로컬 Agent CLI가 실제 코드베이스를 읽어 예상 작업량을 line 단위 범위로 추정하고, 그 결과를 GitHub 댓글과 라벨에 반영하는 Python 프로그램이다.
 
 이 시스템은 "이슈 감지 -> 요구사항 명확화 -> 코드 기반 작업량 추정 -> stale 감지 -> 수동 재평가" 흐름을 자동화하는 것을 목표로 한다.
 
@@ -87,7 +87,7 @@ MVP는 라벨 중심으로 운영한다. 다만 초기 아키텍처는 이후 Gi
   - 저장소 등록, private GitHub App 설치, bootstrap, `/stop`, 라벨 관리
 - 이슈 작성자
   - 요구사항 답변, `/refresh`
-- GitHub Issue Analyzer
+- your-issue-is-unclear
   - 이벤트 감지, 상태 전이, 에이전트 실행, 댓글/라벨 반영
 - Private GitHub App
   - installation token 발급, GitHub 상의 봇 정체성 제공, 댓글/라벨 변경 수행

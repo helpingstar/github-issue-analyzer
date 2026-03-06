@@ -1,4 +1,6 @@
-# GitHub Issue Analyzer
+# your-issue-is-unclear
+
+`your-issue-is-unclear` is the bot display name for this project.
 
 GitHub Issue Analyzer is a local Python worker that watches GitHub Issues, asks clarification questions when requirements are unclear, analyzes a local checkout with a pluggable agent backend, and writes the result back to GitHub comments and labels.
 
