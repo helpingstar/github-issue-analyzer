@@ -1,0 +1,15 @@
+[defaults]
+trigger_label = "ai:analyze"
+clarification_reminder_days = 7
+polling_interval_seconds = 30
+
+[[repos]]
+owner_repo = "helpingstar/example-repo"
+enabled = true
+
+[[repos]]
+owner_repo = "helpingstar/another-repo"
+trigger_label = "custom:analyze"
+polling_interval_seconds = 60
+base_branch_override = "main"
+agent_backend_override = "codex"
