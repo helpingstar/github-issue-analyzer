@@ -47,6 +47,22 @@ project_v2_create_if_missing = true
     assert config.repos[0].project_v2_create_if_missing is True
 
 
+def test_load_file_config_reads_agent_model_override(tmp_path: Path) -> None:
+    config_path = tmp_path / "repos.toml"
+    config_path.write_text(
+        """
+[[repos]]
+owner_repo = "helpingstar/example"
+agent_model_override = "gpt-5.4"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_file_config(config_path)
+
+    assert config.repos[0].agent_model_override == "gpt-5.4"
+
+
 def test_repo_config_requires_complete_project_v2_settings() -> None:
     with pytest.raises(ValueError):
         RepoConfig(
@@ -76,18 +92,24 @@ def test_load_configuration_reads_project_dotenv(tmp_path: Path, monkeypatch) ->
                 "GIA_GITHUB_APP_ID=123456",
                 "GIA_GITHUB_APP_PRIVATE_KEY_PATH=/tmp/test-app.pem",
                 "GIA_GITHUB_PROJECT_TOKEN=ghp_test123",
+                "GIA_DEFAULT_AGENT_MODEL=gpt-5.4",
+                "GIA_DEFAULT_AGENT_REASONING_EFFORT=medium",
             ]
         ),
         encoding="utf-8",
     )
     monkeypatch.delenv("GIA_GITHUB_APP_ID", raising=False)
     monkeypatch.delenv("GIA_GITHUB_APP_PRIVATE_KEY_PATH", raising=False)
+    monkeypatch.delenv("GIA_DEFAULT_AGENT_MODEL", raising=False)
+    monkeypatch.delenv("GIA_DEFAULT_AGENT_REASONING_EFFORT", raising=False)
 
     _, runtime, _ = load_configuration(project_root, config_path)
 
     assert runtime.github_app_id == 123456
     assert runtime.github_app_private_key_path == Path("/tmp/test-app.pem")
     assert runtime.github_project_token == "ghp_test123"
+    assert runtime.default_agent_model == "gpt-5.4"
+    assert runtime.default_agent_reasoning_effort == "medium"
 
 
 def test_load_configuration_does_not_override_existing_env(tmp_path: Path, monkeypatch) -> None:
@@ -100,14 +122,20 @@ def test_load_configuration_does_not_override_existing_env(tmp_path: Path, monke
             [
                 "GIA_GITHUB_APP_ID=123456",
                 "GIA_GITHUB_APP_PRIVATE_KEY_PATH=/tmp/from-dotenv.pem",
+                "GIA_DEFAULT_AGENT_MODEL=gpt-5.4",
+                "GIA_DEFAULT_AGENT_REASONING_EFFORT=medium",
             ]
         ),
         encoding="utf-8",
     )
     monkeypatch.setenv("GIA_GITHUB_APP_ID", "654321")
     monkeypatch.setenv("GIA_GITHUB_APP_PRIVATE_KEY_PATH", "/tmp/from-shell.pem")
+    monkeypatch.setenv("GIA_DEFAULT_AGENT_MODEL", "o3")
+    monkeypatch.setenv("GIA_DEFAULT_AGENT_REASONING_EFFORT", "high")
 
     _, runtime, _ = load_configuration(project_root, config_path)
 
     assert runtime.github_app_id == 654321
     assert runtime.github_app_private_key_path == Path("/tmp/from-shell.pem")
+    assert runtime.default_agent_model == "o3"
+    assert runtime.default_agent_reasoning_effort == "high"

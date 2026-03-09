@@ -94,7 +94,7 @@ class EstimateSnapshotORM(Base):
     lines_deleted_max: Mapped[int] = mapped_column(Integer)
     lines_total_min: Mapped[int] = mapped_column(Integer)
     lines_total_max: Mapped[int] = mapped_column(Integer)
-    confidence: Mapped[str] = mapped_column(String)
+    confidence: Mapped[str] = mapped_column(String, default="")
     candidate_files: Mapped[list[str]] = mapped_column(JSON)
     reasons: Mapped[list[str]] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -272,6 +272,16 @@ class StateStore:
             record = session.get(ClarificationSessionORM, session_id)
             if record:
                 record.last_polled_at = utcnow()
+
+    def update_clarification_session_answer_sources(
+        self,
+        session_id: int,
+        answer_sources: list[dict],
+    ) -> None:
+        with self.session() as session:
+            record = session.get(ClarificationSessionORM, session_id)
+            if record:
+                record.answer_sources = answer_sources
 
     def create_estimate_snapshot(
         self,

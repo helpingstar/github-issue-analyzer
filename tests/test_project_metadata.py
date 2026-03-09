@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from github_issue_analyzer.models import Confidence, EstimateResult, RepoConfig
+from github_issue_analyzer.models import EstimateResult, RepoConfig
 from github_issue_analyzer.services.project_metadata import ProjectMetadataService
 
 
@@ -118,7 +118,6 @@ def build_estimate() -> EstimateResult:
         lines_deleted_max=20,
         lines_total_min=120,
         lines_total_max=260,
-        confidence=Confidence.MEDIUM,
         files=["src/app.py"],
         reasons=["Touches core workflow"],
     )

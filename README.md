@@ -72,6 +72,8 @@ uv run github-issue-analyzer worker --once
 - `GIA_CLARIFICATION_TIMEOUT_SECONDS` (optional)
 - `GIA_ESTIMATE_TIMEOUT_SECONDS` (optional)
 - `GIA_DEFAULT_AGENT_BACKEND` (optional)
+- `GIA_DEFAULT_AGENT_MODEL` (optional)
+- `GIA_DEFAULT_AGENT_REASONING_EFFORT` (optional)
 - `GIA_LOG_LEVEL` (optional)
 
 ## CLI
@@ -91,6 +93,16 @@ Available commands:
 The default config file path is [config/repos.toml](/Users/helpingstar/project/github-issue-analyzer/config/repos.toml).
 
 An example is included at [config/repos.example.toml](/Users/helpingstar/project/github-issue-analyzer/config/repos.example.toml).
+
+Agent selection settings:
+
+- `GIA_DEFAULT_AGENT_BACKEND` sets the global backend default
+- `GIA_DEFAULT_AGENT_MODEL` sets the global model passed to the agent CLI
+- `GIA_DEFAULT_AGENT_REASONING_EFFORT` sets the global reasoning effort passed to the agent CLI
+- `agent_backend_override` overrides the backend for one repo
+- `agent_model_override` overrides the model for one repo
+
+If no model or reasoning effort is configured here, the worker falls back to the Codex CLI defaults from `~/.codex/config.toml`.
 
 ## Project sync
 

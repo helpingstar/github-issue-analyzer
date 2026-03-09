@@ -13,8 +13,15 @@ from github_issue_analyzer.models import AgentRequest, AgentResponse
 
 
 class CodexAdapter(AgentAdapter):
-    def __init__(self, command: str = "codex") -> None:
+    def __init__(
+        self,
+        command: str = "codex",
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> None:
         self.command = command
+        self.model = model.strip() if model else None
+        self.reasoning_effort = reasoning_effort.strip() if reasoning_effort else None
 
     async def analyze(
         self, request: AgentRequest, *, clarification_timeout: int, estimate_timeout: int
@@ -37,18 +44,30 @@ class CodexAdapter(AgentAdapter):
             output_path = Path(temp_dir) / "result.json"
             schema_path.write_text(json.dumps(schema, ensure_ascii=False, indent=2), encoding="utf-8")
 
-            process = await asyncio.create_subprocess_exec(
+            command = [
                 self.command,
                 "exec",
                 "-C",
                 str(cwd),
                 "-s",
                 "read-only",
-                "--output-schema",
-                str(schema_path),
-                "-o",
-                str(output_path),
-                prompt,
+            ]
+            if self.model:
+                command.extend(["-m", self.model])
+            if self.reasoning_effort:
+                command.extend(["-c", f'model_reasoning_effort="{self.reasoning_effort}"'])
+            command.extend(
+                [
+                    "--output-schema",
+                    str(schema_path),
+                    "-o",
+                    str(output_path),
+                    prompt,
+                ]
+            )
+
+            process = await asyncio.create_subprocess_exec(
+                *command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )

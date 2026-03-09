@@ -16,3 +16,4 @@ trigger_label = "custom:analyze"
 polling_interval_seconds = 60
 base_branch_override = "main"
 agent_backend_override = "codex"
+agent_model_override = "gpt-5.4"

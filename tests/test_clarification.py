@@ -1,4 +1,4 @@
-from github_issue_analyzer.models import QuestionSpec
+from github_issue_analyzer.models import ANSWER_PENDING_OPTION, QuestionSpec
 from github_issue_analyzer.workflow.clarification import parse_clarification_comment_body
 
 
@@ -50,3 +50,43 @@ def test_parse_free_text_fallback() -> None:
     assert result.valid is True
     assert result.complete is True
     assert result.answers[0].free_text == "E2E 테스트까지 포함"
+
+
+def test_question_spec_appends_answer_pending_option() -> None:
+    question = QuestionSpec(
+        question_id="Q1",
+        slot="scope",
+        type="single-select",
+        min_select=1,
+        max_select=1,
+        prompt="범위를 선택해 주세요.",
+        options=["API", "UI"],
+    )
+
+    assert question.options == ["API", "UI", ANSWER_PENDING_OPTION]
+
+
+def test_parse_answer_pending_option() -> None:
+    body = """
+### Q1. 범위를 선택해 주세요.
+- 타입: `single-select`
+- 허용 선택 수: `1~1`
+- [ ] API
+- [ ] UI
+- [x] 답변 보류
+""".strip()
+    question = QuestionSpec(
+        question_id="Q1",
+        slot="scope",
+        type="single-select",
+        min_select=1,
+        max_select=1,
+        prompt="범위를 선택해 주세요.",
+        options=["API", "UI"],
+    )
+
+    result = parse_clarification_comment_body(body, [question], [])
+
+    assert result.valid is True
+    assert result.complete is True
+    assert result.answers[0].selected_options == ["답변 보류"]

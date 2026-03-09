@@ -7,6 +7,9 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
+ANSWER_PENDING_OPTION = "답변 보류"
+
+
 class WorkflowState(StrEnum):
     NEW = "NEW"
     NEEDS_CLARIFICATION = "NEEDS_CLARIFICATION"
@@ -17,12 +20,6 @@ class WorkflowState(StrEnum):
     REFRESHING = "REFRESHING"
     STOPPED = "STOPPED"
     ERROR = "ERROR"
-
-
-class Confidence(StrEnum):
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
 
 
 class RepoDefaults(BaseModel):
@@ -38,6 +35,7 @@ class RepoConfig(BaseModel):
     polling_interval_seconds: int | None = None
     base_branch_override: str | None = None
     agent_backend_override: str | None = None
+    agent_model_override: str | None = None
     checkout_path_override: str | None = None
     project_v2_url: str | None = None
     project_v2_title: str | None = None
@@ -108,6 +106,8 @@ class AppRuntimeSettings(BaseModel):
     clarification_timeout_seconds: int = 300
     estimate_timeout_seconds: int = 1800
     default_agent_backend: str = "codex"
+    default_agent_model: str | None = None
+    default_agent_reasoning_effort: str | None = None
     log_level: str = "INFO"
 
 
@@ -130,6 +130,12 @@ class QuestionSpec(BaseModel):
     recommended_option: str | None = None
     option_descriptions: list[str] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def ensure_answer_pending_option(self) -> "QuestionSpec":
+        if ANSWER_PENDING_OPTION not in self.options:
+            self.options.append(ANSWER_PENDING_OPTION)
+        return self
+
 
 class EstimateResult(BaseModel):
     base_commit: str | None = None
@@ -141,7 +147,6 @@ class EstimateResult(BaseModel):
     lines_deleted_max: int
     lines_total_min: int
     lines_total_max: int
-    confidence: Confidence
     files: list[str]
     reasons: list[str]
 
@@ -191,4 +196,14 @@ class ClarificationParseResult(BaseModel):
             else:
                 value = ", ".join(answer.selected_options)
             lines.append(f"{answer.question_id} ({answer.prompt}): {value}")
+        return lines
+
+    def as_summary_lines(self) -> list[str]:
+        lines: list[str] = []
+        for answer in self.answers:
+            if answer.free_text:
+                value = answer.free_text
+            else:
+                value = ", ".join(answer.selected_options)
+            lines.append(f"- {answer.prompt}: {value}")
         return lines

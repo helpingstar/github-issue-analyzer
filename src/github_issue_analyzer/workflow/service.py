@@ -30,6 +30,7 @@ from github_issue_analyzer.workflow.comments import (
     CONFIDENCE_LABELS,
     STATE_LABELS,
     render_clarification_comment,
+    render_clarification_summary_comment,
     render_error_comment,
     render_estimate_comment,
     render_requirements_changed_comment,
@@ -193,6 +194,10 @@ class WorkflowService:
 
         clarification_lines: list[str] = []
         active_session = self.state_store.get_active_clarification_session(repo.owner_repo, issue_number)
+        clarification_answer_sources: list[dict] = []
+        backend = repo.agent_backend_override or self.runtime_settings.default_agent_backend
+        model = repo.agent_model_override or self.runtime_settings.default_agent_model
+        reasoning_effort = self.runtime_settings.default_agent_reasoning_effort
         if active_session:
             clarification = await self._parse_active_clarification(
                 repo, issue_number, active_session, comments, registration.app_installation_id, allowed_logins
@@ -221,9 +226,21 @@ class WorkflowService:
                 )
                 return
             clarification_lines = clarification.as_prompt_lines()
+            clarification_answer_sources = await self._sync_clarification_summary_comment(
+                repo,
+                issue_number,
+                active_session,
+                clarification,
+                registration.app_installation_id,
+                model,
+                reasoning_effort,
+            )
 
-        backend = repo.agent_backend_override or self.runtime_settings.default_agent_backend
-        agent: AgentAdapter = self.agent_factory(backend)
+        agent: AgentAdapter = self.agent_factory(
+            backend,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
         request = AgentRequest(
             owner_repo=repo.owner_repo,
             issue_number=issue_number,
@@ -253,7 +270,11 @@ class WorkflowService:
                 repo.owner,
                 repo.repo,
                 issue_number,
-                render_error_comment(str(exc)),
+                render_error_comment(
+                    str(exc),
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                ),
                 installation_id=registration.app_installation_id,
             )
             self.state_store.update_issue_record(
@@ -278,6 +299,8 @@ class WorkflowService:
                 latest_authorized_comment_id,
                 base_branch,
                 base_commit,
+                model,
+                reasoning_effort,
             )
             return
 
@@ -293,6 +316,9 @@ class WorkflowService:
                 trigger_present,
                 latest_authorized_comment_id,
                 base_branch,
+                model,
+                reasoning_effort,
+                clarification_answer_sources,
             )
 
     async def process_stale_candidates(self, repo: RepoConfig) -> None:
@@ -361,6 +387,8 @@ class WorkflowService:
         latest_authorized_comment_id: int,
         base_branch: str,
         base_commit: str,
+        model: str | None,
+        reasoning_effort: str | None,
     ) -> None:
         self.state_store.supersede_clarification_sessions(repo.owner_repo, issue_number)
         round_number = (record.active_clarification_round or 0) + 1
@@ -368,6 +396,8 @@ class WorkflowService:
             response.missing_slots,
             response.question_specs,
             round_number,
+            model=model,
+            reasoning_effort=reasoning_effort,
         )
         comment = await self.github_client.create_issue_comment(
             repo.owner,
@@ -412,9 +442,16 @@ class WorkflowService:
         trigger_present: bool,
         latest_authorized_comment_id: int,
         base_branch: str,
+        model: str | None,
+        reasoning_effort: str | None,
+        clarification_answer_sources: list[dict],
     ) -> None:
         assert response.estimate is not None
-        self.state_store.resolve_clarification_session(repo.owner_repo, issue_number, [])
+        self.state_store.resolve_clarification_session(
+            repo.owner_repo,
+            issue_number,
+            clarification_answer_sources,
+        )
         self.state_store.create_estimate_snapshot(
             repo.owner_repo,
             issue_number,
@@ -428,7 +465,6 @@ class WorkflowService:
                 "lines_deleted_max": response.estimate.lines_deleted_max,
                 "lines_total_min": response.estimate.lines_total_min,
                 "lines_total_max": response.estimate.lines_total_max,
-                "confidence": response.estimate.confidence.value,
                 "candidate_files": response.estimate.files,
                 "reasons": response.estimate.reasons,
             },
@@ -437,9 +473,15 @@ class WorkflowService:
             repo.owner,
             repo.repo,
             issue_number,
-            render_estimate_comment(base_branch, response.estimate),
+            render_estimate_comment(
+                base_branch,
+                response.estimate,
+                model=model,
+                reasoning_effort=reasoning_effort,
+            ),
             installation_id=installation_id,
         )
+        await self._clear_confidence_label(repo, issue_number, installation_id)
         self.state_store.update_issue_record(
             repo.owner_repo,
             issue_number,
@@ -456,12 +498,6 @@ class WorkflowService:
             last_estimated_at=datetime.now(UTC),
         )
         await self._set_state(repo, issue_number, WorkflowState.ESTIMATED, installation_id)
-        await self._set_confidence_label(
-            repo,
-            issue_number,
-            response.estimate.confidence.value,
-            installation_id,
-        )
         await self._sync_project_estimate(repo, issue, installation_id, response.estimate)
 
     async def _parse_active_clarification(
@@ -494,6 +530,78 @@ class WorkflowService:
         from github_issue_analyzer.models import QuestionSpec
 
         return QuestionSpec.model_validate(data)
+
+    async def _sync_clarification_summary_comment(
+        self,
+        repo: RepoConfig,
+        issue_number: int,
+        session: ClarificationSessionORM,
+        clarification,
+        installation_id: int,
+        model: str | None,
+        reasoning_effort: str | None,
+    ) -> list[dict]:
+        summary_comment_id = self._clarification_summary_comment_id(session.answer_sources)
+        body = render_clarification_summary_comment(
+            clarification.answers,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
+        if summary_comment_id is None:
+            comment = await self.github_client.create_issue_comment(
+                repo.owner,
+                repo.repo,
+                issue_number,
+                body,
+                installation_id=installation_id,
+            )
+            summary_comment_id = comment["id"]
+        else:
+            await self.github_client.update_issue_comment(
+                repo.owner,
+                repo.repo,
+                summary_comment_id,
+                body,
+                installation_id=installation_id,
+            )
+
+        answer_sources = self._build_clarification_answer_sources(
+            clarification,
+            summary_comment_id=summary_comment_id,
+        )
+        self.state_store.update_clarification_session_answer_sources(session.id, answer_sources)
+        return answer_sources
+
+    def _clarification_summary_comment_id(self, answer_sources: list[dict]) -> int | None:
+        for item in answer_sources:
+            if item.get("type") != "requirements_summary_comment":
+                continue
+            comment_id = item.get("comment_id")
+            if isinstance(comment_id, int):
+                return comment_id
+        return None
+
+    def _build_clarification_answer_sources(
+        self,
+        clarification,
+        *,
+        summary_comment_id: int | None,
+    ) -> list[dict]:
+        sources = [
+            {
+                "type": "clarification_answer",
+                **answer.model_dump(),
+            }
+            for answer in clarification.answers
+        ]
+        if summary_comment_id is not None:
+            sources.append(
+                {
+                    "type": "requirements_summary_comment",
+                    "comment_id": summary_comment_id,
+                }
+            )
+        return sources
 
     def _accepted_comments(
         self, issue_comments: list[dict], allowed_logins: set[str]
@@ -557,24 +665,6 @@ class WorkflowService:
         current_labels = {label["name"] for label in current_issue["labels"]}
         desired = STATE_LABELS[state]
         for label in STATE_LABELS.values():
-            if label in current_labels and label != desired:
-                await self.github_client.remove_label_from_issue(
-                    repo.owner, repo.repo, issue_number, label, installation_id=installation_id
-                )
-        if desired not in current_labels:
-            await self.github_client.add_labels_to_issue(
-                repo.owner, repo.repo, issue_number, [desired], installation_id=installation_id
-            )
-
-    async def _set_confidence_label(
-        self, repo: RepoConfig, issue_number: int, confidence: str, installation_id: int
-    ) -> None:
-        current_issue = await self.github_client.get_issue(
-            repo.owner, repo.repo, issue_number, installation_id=installation_id
-        )
-        current_labels = {label["name"] for label in current_issue["labels"]}
-        desired = CONFIDENCE_LABELS[confidence]
-        for label in CONFIDENCE_LABELS.values():
             if label in current_labels and label != desired:
                 await self.github_client.remove_label_from_issue(
                     repo.owner, repo.repo, issue_number, label, installation_id=installation_id
