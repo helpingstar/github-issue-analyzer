@@ -19,6 +19,9 @@ class FakeAppGitHubClient:
     async def update_project_v2_number_field(self, *args, **kwargs):  # pragma: no cover - unused in these tests
         raise AssertionError("app project update should not be used for personal project tests")
 
+    async def get_project_v2_item_number_field_value(self, *args, **kwargs):  # pragma: no cover - unused
+        raise AssertionError("app project field lookup should not be used for personal project tests")
+
     async def clear_project_v2_field_value(self, *args, **kwargs):  # pragma: no cover - unused in these tests
         raise AssertionError("app project clear should not be used for personal project tests")
 
@@ -35,6 +38,7 @@ class FakePersonalProjectClient:
         self.add_calls: list[tuple[str, str]] = []
         self.update_calls: list[tuple[str, str, float]] = []
         self.clear_calls: list[tuple[str, str]] = []
+        self.item_number_values: dict[tuple[str, str], float] = {}
 
     async def get_viewer(self) -> dict[str, str]:
         return self.viewer
@@ -60,12 +64,13 @@ class FakePersonalProjectClient:
 
     async def create_number_field(self, project_id: str, field_name: str) -> None:
         self.create_field_calls.append((project_id, field_name))
+        field_id = f"FIELD_{len(self.create_field_calls)}"
         for project in self.projects_by_number.values():
             if project["id"] != project_id:
                 continue
             project["fields"]["nodes"].append(
                 {
-                    "id": "FIELD_1",
+                    "id": field_id,
                     "name": field_name,
                     "dataType": "NUMBER",
                 }
@@ -92,6 +97,14 @@ class FakePersonalProjectClient:
         value: float,
     ) -> None:
         self.update_calls.append((item_id, field_id, value))
+        self.item_number_values[(item_id, self._field_name(project_id, field_id))] = value
+
+    async def get_project_v2_item_number_field_value(
+        self,
+        item_id: str,
+        field_name: str,
+    ) -> float | None:
+        return self.item_number_values.get((item_id, field_name))
 
     async def clear_project_v2_field_value(
         self,
@@ -100,6 +113,16 @@ class FakePersonalProjectClient:
         field_id: str,
     ) -> None:
         self.clear_calls.append((item_id, field_id))
+        self.item_number_values.pop((item_id, self._field_name(project_id, field_id)), None)
+
+    def _field_name(self, project_id: str, field_id: str) -> str:
+        for project in self.projects_by_number.values():
+            if project["id"] != project_id:
+                continue
+            for field in project["fields"]["nodes"]:
+                if field["id"] == field_id:
+                    return field["name"]
+        raise AssertionError("field not found")
 
 
 def build_repo_config() -> RepoConfig:
@@ -107,6 +130,8 @@ def build_repo_config() -> RepoConfig:
         owner_repo="helpingstar/example",
         project_v2_title="Issue Prioritization",
         project_v2_impact_field_name="Total Impact",
+        project_v2_priority_field_name="Priority",
+        project_v2_priority_index_field_name="PriorityIndex",
         project_v2_create_if_missing=True,
     )
 
@@ -115,6 +140,8 @@ def build_repo_config_with_derived_title() -> RepoConfig:
     return RepoConfig(
         owner_repo="helpingstar/example",
         project_v2_impact_field_name="Total Impact",
+        project_v2_priority_field_name="Priority",
+        project_v2_priority_index_field_name="PriorityIndex",
         project_v2_create_if_missing=True,
     )
 
@@ -154,9 +181,51 @@ def test_sync_estimate_creates_missing_personal_project_and_field() -> None:
     )
 
     assert personal_client.create_project_calls == ["Issue Prioritization"]
-    assert personal_client.create_field_calls == [("PROJECT_1", "Total Impact")]
+    assert personal_client.create_field_calls == [
+        ("PROJECT_1", "Total Impact"),
+        ("PROJECT_1", "Priority"),
+        ("PROJECT_1", "PriorityIndex"),
+    ]
     assert personal_client.add_calls == [("PROJECT_1", "ISSUE_1")]
     assert personal_client.update_calls == [("ITEM_1", "FIELD_1", 190.0)]
+    assert personal_client.clear_calls == [("ITEM_1", "FIELD_3")]
+
+
+def test_sync_estimate_updates_priority_index_from_priority_field() -> None:
+    personal_client = FakePersonalProjectClient()
+    personal_client.projects_by_title["Issue Prioritization"] = {
+        "id": "PROJECT_1",
+        "title": "Issue Prioritization",
+        "number": 7,
+        "fields": {
+            "nodes": [
+                {"id": "FIELD_1", "name": "Total Impact", "dataType": "NUMBER"},
+                {"id": "FIELD_2", "name": "Priority", "dataType": "NUMBER"},
+                {"id": "FIELD_3", "name": "PriorityIndex", "dataType": "NUMBER"},
+            ]
+        },
+    }
+    personal_client.projects_by_number[7] = personal_client.projects_by_title["Issue Prioritization"]
+    personal_client.item_id = "ITEM_1"
+    personal_client.item_number_values[("ITEM_1", "Priority")] = 3.0
+    service = ProjectMetadataService(
+        FakeAppGitHubClient(),  # type: ignore[arg-type]
+        personal_client,  # type: ignore[arg-type]
+    )
+
+    asyncio.run(
+        service.sync_estimate(
+            build_repo_config(),
+            {"number": 42, "node_id": "ISSUE_1"},
+            1,
+            build_estimate(),
+        )
+    )
+
+    assert personal_client.update_calls == [
+        ("ITEM_1", "FIELD_1", 190.0),
+        ("ITEM_1", "FIELD_3", 570.0),
+    ]
 
 
 def test_clear_estimate_skips_missing_personal_project_item() -> None:
@@ -178,6 +247,36 @@ def test_clear_estimate_skips_missing_personal_project_item() -> None:
     asyncio.run(service.clear_estimate(build_repo_config(), {"number": 42, "node_id": "ISSUE_1"}, 1))
 
     assert personal_client.clear_calls == []
+
+
+def test_clear_estimate_clears_priority_index_but_leaves_priority() -> None:
+    personal_client = FakePersonalProjectClient()
+    personal_client.projects_by_title["Issue Prioritization"] = {
+        "id": "PROJECT_1",
+        "title": "Issue Prioritization",
+        "number": 7,
+        "fields": {
+            "nodes": [
+                {"id": "FIELD_1", "name": "Total Impact", "dataType": "NUMBER"},
+                {"id": "FIELD_2", "name": "Priority", "dataType": "NUMBER"},
+                {"id": "FIELD_3", "name": "PriorityIndex", "dataType": "NUMBER"},
+            ]
+        },
+    }
+    personal_client.projects_by_number[7] = personal_client.projects_by_title["Issue Prioritization"]
+    personal_client.item_id = "ITEM_1"
+    personal_client.item_number_values[("ITEM_1", "Priority")] = 5.0
+    personal_client.item_number_values[("ITEM_1", "Total Impact")] = 190.0
+    personal_client.item_number_values[("ITEM_1", "PriorityIndex")] = 950.0
+    service = ProjectMetadataService(
+        FakeAppGitHubClient(),  # type: ignore[arg-type]
+        personal_client,  # type: ignore[arg-type]
+    )
+
+    asyncio.run(service.clear_estimate(build_repo_config(), {"number": 42, "node_id": "ISSUE_1"}, 1))
+
+    assert personal_client.clear_calls == [("ITEM_1", "FIELD_1"), ("ITEM_1", "FIELD_3")]
+    assert personal_client.item_number_values[("ITEM_1", "Priority")] == 5.0
 
 
 def test_validate_repo_config_requires_pat_for_personal_project_sync() -> None:
@@ -203,5 +302,9 @@ def test_validate_repo_config_uses_derived_project_title_and_links_repository() 
     )
 
     assert personal_client.create_project_calls == ["example_project_issue_prioritization"]
-    assert personal_client.create_field_calls == [("PROJECT_1", "Total Impact")]
+    assert personal_client.create_field_calls == [
+        ("PROJECT_1", "Total Impact"),
+        ("PROJECT_1", "Priority"),
+        ("PROJECT_1", "PriorityIndex"),
+    ]
     assert personal_client.link_calls == [("PROJECT_1", "REPO_1")]

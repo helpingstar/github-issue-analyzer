@@ -478,6 +478,37 @@ class GitHubClient:
             installation_id=installation_id,
         )
 
+    async def get_project_v2_item_number_field_value(
+        self,
+        owner: str,
+        repo: str,
+        item_id: str,
+        field_name: str,
+        installation_id: int | None = None,
+    ) -> float | None:
+        query = """
+        query($itemId: ID!, $fieldName: String!) {
+          node(id: $itemId) {
+            ... on ProjectV2Item {
+              fieldValueByName(name: $fieldName) {
+                ... on ProjectV2ItemFieldNumberValue {
+                  number
+                }
+              }
+            }
+          }
+        }
+        """
+        data = await self.graphql(
+            owner,
+            repo,
+            query,
+            {"itemId": item_id, "fieldName": field_name},
+            installation_id=installation_id,
+        )
+        value = ((data.get("node") or {}).get("fieldValueByName")) or {}
+        return value.get("number")
+
     async def clear_project_v2_field_value(
         self,
         owner: str,

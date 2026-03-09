@@ -26,6 +26,10 @@ class RepoDefaults(BaseModel):
     trigger_label: str = "ai:analyze"
     clarification_reminder_days: int = 7
     polling_interval_seconds: int = 30
+    project_v2_impact_field_name: str | None = None
+    project_v2_priority_field_name: str | None = None
+    project_v2_priority_index_field_name: str | None = None
+    project_v2_create_if_missing: bool = False
 
 
 class RepoConfig(BaseModel):
@@ -42,7 +46,9 @@ class RepoConfig(BaseModel):
     project_v2_url: str | None = None
     project_v2_title: str | None = None
     project_v2_impact_field_name: str | None = None
-    project_v2_create_if_missing: bool = False
+    project_v2_priority_field_name: str | None = None
+    project_v2_priority_index_field_name: str | None = None
+    project_v2_create_if_missing: bool | None = None
     enabled: bool = True
 
     @field_validator("owner_repo")
@@ -57,6 +63,8 @@ class RepoConfig(BaseModel):
         has_url = bool(self.project_v2_url)
         has_title = bool(self.project_v2_title)
         has_field_name = bool(self.project_v2_impact_field_name)
+        has_priority_field_name = bool(self.project_v2_priority_field_name)
+        has_priority_index_field_name = bool(self.project_v2_priority_index_field_name)
         if has_url and has_title:
             raise ValueError(
                 "project_v2_url and project_v2_title are mutually exclusive"
@@ -72,6 +80,15 @@ class RepoConfig(BaseModel):
         if self.project_v2_create_if_missing and not (has_title or (has_field_name and not has_url)):
             raise ValueError(
                 "project_v2_create_if_missing requires project_v2_title or an implied default title"
+            )
+        if (has_priority_field_name or has_priority_index_field_name) and not has_field_name:
+            raise ValueError(
+                "project_v2_priority_field_name and project_v2_priority_index_field_name "
+                "require project_v2_impact_field_name"
+            )
+        if has_priority_index_field_name and not has_priority_field_name:
+            raise ValueError(
+                "project_v2_priority_index_field_name requires project_v2_priority_field_name"
             )
         return self
 
@@ -97,6 +114,14 @@ class RepoConfig(BaseModel):
         return bool((self.project_v2_url or self.resolved_project_v2_title) and self.project_v2_impact_field_name)
 
     @property
+    def project_v2_priority_index_enabled(self) -> bool:
+        return bool(
+            self.project_v2_enabled
+            and self.project_v2_priority_field_name
+            and self.project_v2_priority_index_field_name
+        )
+
+    @property
     def resolved_project_v2_title(self) -> str | None:
         if self.project_v2_url:
             return None
@@ -110,6 +135,50 @@ class RepoConfig(BaseModel):
 class FileConfig(BaseModel):
     defaults: RepoDefaults = Field(default_factory=RepoDefaults)
     repos: list[RepoConfig] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def apply_project_v2_defaults(cls, data):
+        if not isinstance(data, dict):
+            return data
+
+        defaults = data.get("defaults")
+        repos = data.get("repos")
+        if not isinstance(defaults, dict) or not isinstance(repos, list):
+            return data
+
+        impact_field_name = defaults.get("project_v2_impact_field_name")
+        priority_field_name = defaults.get("project_v2_priority_field_name")
+        priority_index_field_name = defaults.get("project_v2_priority_index_field_name")
+        create_if_missing = defaults.get("project_v2_create_if_missing")
+        merged_repos = []
+
+        for repo in repos:
+            if not isinstance(repo, dict):
+                merged_repos.append(repo)
+                continue
+
+            merged_repo = dict(repo)
+            if (
+                merged_repo.get("project_v2_impact_field_name") is None
+                and impact_field_name is not None
+            ):
+                merged_repo["project_v2_impact_field_name"] = impact_field_name
+            if (
+                merged_repo.get("project_v2_priority_field_name") is None
+                and priority_field_name is not None
+            ):
+                merged_repo["project_v2_priority_field_name"] = priority_field_name
+            if (
+                merged_repo.get("project_v2_priority_index_field_name") is None
+                and priority_index_field_name is not None
+            ):
+                merged_repo["project_v2_priority_index_field_name"] = priority_index_field_name
+            if "project_v2_create_if_missing" not in merged_repo and create_if_missing is not None:
+                merged_repo["project_v2_create_if_missing"] = create_if_missing
+            merged_repos.append(merged_repo)
+
+        return {**data, "repos": merged_repos}
 
 
 class AppRuntimeSettings(BaseModel):
@@ -147,6 +216,14 @@ class QuestionSpec(BaseModel):
     options: list[str]
     recommended_option: str | None = None
     option_descriptions: list[str] = Field(default_factory=list)
+
+    @field_validator("question_id")
+    @classmethod
+    def normalize_question_id(cls, value: str) -> str:
+        stripped = value.strip()
+        if stripped[:1].lower() == "q" and stripped[1:].isdigit():
+            return f"Q{stripped[1:]}"
+        return stripped
 
     @model_validator(mode="after")
     def ensure_answer_pending_option(self) -> "QuestionSpec":
@@ -195,9 +272,42 @@ class AgentRequest(BaseModel):
 
 class ClarificationAnswer(BaseModel):
     question_id: str
+    slot: str | None = None
     prompt: str
     selected_options: list[str] = Field(default_factory=list)
+    selected_option_descriptions: list[str] = Field(default_factory=list)
     free_text: str | None = None
+
+    def answer_value(self) -> str:
+        if self.free_text:
+            return self.free_text
+        return ", ".join(self.selected_options)
+
+    def answer_description(self) -> str | None:
+        if self.free_text or not self.selected_option_descriptions:
+            return None
+        if len(self.selected_options) == len(self.selected_option_descriptions):
+            return " / ".join(
+                f"{option}: {description}"
+                for option, description in zip(
+                    self.selected_options,
+                    self.selected_option_descriptions,
+                    strict=False,
+                )
+            )
+        return " / ".join(self.selected_option_descriptions)
+
+    def as_prompt_line(self) -> str:
+        identifier = self.slot or self.question_id
+        parts = [
+            f"slot={identifier}",
+            f"question={self.prompt}",
+            f"answer={self.answer_value()}",
+        ]
+        description = self.answer_description()
+        if description:
+            parts.append(f"answer_description={description}")
+        return " | ".join(parts)
 
 
 class ClarificationParseResult(BaseModel):
@@ -207,14 +317,7 @@ class ClarificationParseResult(BaseModel):
     errors: list[str] = Field(default_factory=list)
 
     def as_prompt_lines(self) -> list[str]:
-        lines: list[str] = []
-        for answer in self.answers:
-            if answer.free_text:
-                value = answer.free_text
-            else:
-                value = ", ".join(answer.selected_options)
-            lines.append(f"{answer.question_id} ({answer.prompt}): {value}")
-        return lines
+        return [answer.as_prompt_line() for answer in self.answers]
 
     def as_summary_lines(self) -> list[str]:
         lines: list[str] = []

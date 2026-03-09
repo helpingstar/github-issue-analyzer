@@ -6,6 +6,8 @@ from github_issue_analyzer.branding import BOT_NAME
 from github_issue_analyzer.models import ClarificationAnswer, EstimateResult, QuestionSpec, WorkflowState
 
 
+REFRESH_LABEL = "ai:refresh"
+
 STATE_LABELS = {
     WorkflowState.NEEDS_CLARIFICATION: "ai:needs-clarification",
     WorkflowState.READY_FOR_ESTIMATE: "ai:ready-for-estimate",
@@ -25,6 +27,7 @@ CONFIDENCE_LABELS = {
 
 BOOTSTRAP_LABEL_SPECS = {
     "ai:analyze": ("1d76db", f"{BOT_NAME} trigger label"),
+    REFRESH_LABEL: ("bfd4f2", f"{BOT_NAME} manual refresh request"),
     "ai:needs-clarification": ("fbca04", f"{BOT_NAME} needs more detail"),
     "ai:ready-for-estimate": ("0e8a16", f"{BOT_NAME} has enough detail to estimate"),
     "ai:estimating": ("5319e7", f"{BOT_NAME} is running estimate"),
@@ -47,12 +50,16 @@ def _render_agent_settings_lines(model: str | None, reasoning_effort: str | None
 
 def _render_clarification_answer_lines(answers: list[ClarificationAnswer]) -> list[str]:
     lines: list[str] = []
-    for answer in answers:
-        if answer.free_text:
-            value = answer.free_text
-        else:
-            value = ", ".join(answer.selected_options)
-        lines.append(f"- {answer.prompt}: {value}")
+    for index, answer in enumerate(answers, start=1):
+        lines.append(f"{index}. 질문: {answer.prompt}")
+        lines.append(f"{index}. 답변: {answer.answer_value()}")
+        description = answer.answer_description()
+        if description:
+            lines.append(f"{index}. 답변 설명: {description}")
+        lines.append("")
+    if lines:
+        lines.pop()
+        return lines
     return lines or ["- (정리된 요구사항 없음)"]
 
 
@@ -95,11 +102,11 @@ def render_clarification_comment(
         f"<!-- issue-analyzer:clarification round={round_number} -->",
     ]
 
-    for spec in question_specs:
+    for index, spec in enumerate(question_specs, start=1):
         lines.extend(
             [
                 "",
-                f"### {spec.question_id}. {spec.prompt}",
+                f"### Q{index}. {spec.prompt}",
                 f"- 타입: `{spec.type}`",
                 f"- 허용 선택 수: `{spec.min_select}~{spec.max_select}`",
             ]
@@ -163,7 +170,7 @@ def render_estimate_comment(
             "- 근거:",
             *[f"  - {reason}" for reason in estimate.reasons],
             "",
-            "`/refresh` 로 전체 재평가를 다시 실행할 수 있습니다.",
+            f"`{REFRESH_LABEL}` 라벨 또는 `/refresh` 로 전체 재평가를 다시 실행할 수 있습니다.",
         ]
     )
 
@@ -197,7 +204,7 @@ def render_stale_comment(previous_commit: str, current_commit: str, matched_file
         "- 겹친 파일:",
         *[f"  - `{path}`" for path in matched_files],
         "",
-        "`/refresh` 로 전체 재평가를 다시 실행할 수 있습니다.",
+        f"`{REFRESH_LABEL}` 라벨 또는 `/refresh` 로 전체 재평가를 다시 실행할 수 있습니다.",
     ]
     return "\n".join(lines)
 
@@ -208,7 +215,7 @@ def render_requirements_changed_comment() -> str:
             f"[{BOT_NAME}]",
             "",
             "기존 추정 이후 요구사항 변경이 감지되어 상태를 `needs-clarification`으로 되돌렸습니다.",
-            "필요하면 내용을 보완한 뒤 `/refresh` 로 전체 재평가를 다시 실행해 주세요.",
+            f"필요하면 내용을 보완한 뒤 `{REFRESH_LABEL}` 라벨 또는 `/refresh` 로 전체 재평가를 다시 실행해 주세요.",
         ]
     )
 

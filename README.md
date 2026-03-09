@@ -90,6 +90,14 @@ Available commands:
 - `worker`
 - `refresh`
 
+## Manual refresh
+
+After `bootstrap`, the worker also creates the `ai:refresh` label.
+
+- add `ai:refresh` to an issue to request a one-time reevaluation
+- the worker removes `ai:refresh` after consuming it
+- `/refresh` issue comments still work too
+
 ## Config file
 
 The default config file path is [config/repos.toml](/Users/helpingstar/project/github-issue-analyzer/config/repos.toml).
@@ -107,6 +115,8 @@ Agent selection settings:
 - `agent_model_override` overrides the model for one repo
 - `agent_role_override` overrides the prompt persona for one repo
 - `agent_language_override` overrides the language for one repo
+- `project_v2_impact_field_name` and `project_v2_create_if_missing` can be set under `[defaults]` and inherited by each repo
+- `project_v2_priority_field_name` and `project_v2_priority_index_field_name` can also be set under `[defaults]`
 
 If no model or reasoning effort is configured here, the worker falls back to the Codex CLI defaults from `~/.codex/config.toml`.
 
@@ -115,7 +125,11 @@ If no model or reasoning effort is configured here, the worker falls back to the
 If you want GitHub Projects v2 sync, add these fields to a repo entry:
 
 - `project_v2_impact_field_name`
+- `project_v2_priority_field_name` (optional)
+- `project_v2_priority_index_field_name` (optional)
 - `project_v2_create_if_missing`
+
+If those values are the same for all repositories, you can put them under `[defaults]` instead.
 
 `project_v2_title` is optional. If you omit it, the worker derives `<repo>_project_issue_prioritization`.
 
@@ -124,8 +138,20 @@ With `GIA_GITHUB_PROJECT_TOKEN`, the worker uses your personal token for Project
 - it finds a personal Project by `project_v2_title` or the derived default title
 - if `project_v2_create_if_missing = true`, it creates the Project when missing
 - it links the repository to the Project during bootstrap
-- it creates the `Number` field when missing
+- it creates the configured `Number` fields when missing
 - it writes a single representative total-impact value using the midpoint of the estimated range
+- if `project_v2_priority_field_name` is configured, it creates that `Number` field so you can manage priority manually in GitHub Projects
+- if both `project_v2_priority_field_name` and `project_v2_priority_index_field_name` are configured, it reads `Priority`, writes `PriorityIndex = Priority * Total Impact`, and keeps `PriorityIndex` synced for open estimated issues
+- if you prefer a native GitHub formula column, set only `project_v2_priority_field_name` here and create the formula column yourself in the Project UI
+
+Example:
+
+```toml
+[defaults]
+project_v2_impact_field_name = "Total Impact"
+project_v2_priority_field_name = "Priority"
+project_v2_create_if_missing = true
+```
 
 Issue comments and labels still use the GitHub App installation token.
 

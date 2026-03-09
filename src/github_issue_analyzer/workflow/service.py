@@ -4,6 +4,7 @@ import logging
 from datetime import UTC, datetime
 
 import httpx
+from pydantic import ValidationError
 
 from github_issue_analyzer.agent.base import AgentAdapter
 from github_issue_analyzer.db import (
@@ -15,6 +16,7 @@ from github_issue_analyzer.github.client import GitHubClient
 from github_issue_analyzer.models import (
     AgentRequest,
     AgentResponse,
+    ClarificationAnswer,
     EstimateResult,
     FileConfig,
     RecognizedComment,
@@ -28,9 +30,9 @@ from github_issue_analyzer.utils import hash_text, is_command_comment, is_free_t
 from github_issue_analyzer.workflow.clarification import parse_clarification_comment_body
 from github_issue_analyzer.workflow.comments import (
     CONFIDENCE_LABELS,
+    REFRESH_LABEL,
     STATE_LABELS,
     render_clarification_comment,
-    render_clarification_summary_comment,
     render_error_comment,
     render_estimate_comment,
     render_requirements_changed_comment,
@@ -72,21 +74,8 @@ class WorkflowService:
                 repo.owner, repo.repo, issue_number, installation_id=registration.app_installation_id
             )
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code in (404, 410):
-                logger.warning(
-                    "issue no longer available; skipping %s#%s with status %s",
-                    repo.owner_repo,
-                    issue_number,
-                    exc.response.status_code,
-                )
-                self.state_store.supersede_clarification_sessions(repo.owner_repo, issue_number)
-                self.state_store.update_issue_record(
-                    repo.owner_repo,
-                    issue_number,
-                    issue_state="gone",
-                    active_clarification_round=None,
-                    active_clarification_comment_id=None,
-                )
+            if self._is_resource_unavailable(exc):
+                self._mark_issue_unavailable(repo, issue_number, exc.response.status_code)
                 return
             raise
         if "pull_request" in issue:
@@ -96,11 +85,23 @@ class WorkflowService:
         issue_body = issue.get("body") or ""
         body_hash = hash_text(issue_body)
         trigger_label = repo.resolved_trigger_label(self.file_config.defaults)
-        trigger_present = trigger_label in {label["name"] for label in issue["labels"]}
+        issue_labels = {label["name"] for label in issue["labels"]}
+        trigger_present = trigger_label in issue_labels
+        refresh_label_present = REFRESH_LABEL in issue_labels
         allowed_logins = {repo.owner, issue["user"]["login"]}
         comments = await self.github_client.list_issue_comments(
             repo.owner, repo.repo, issue_number, installation_id=registration.app_installation_id
         )
+        accepted_comments = self._accepted_comments(comments, allowed_logins)
+        latest_authorized_comment_id = max(
+            (comment.comment_id for comment in accepted_comments),
+            default=record.latest_processed_comment_id or 0,
+        )
+        refresh_requested = force_refresh or refresh_label_present or self._refresh_requested(
+            comments, allowed_logins, record.latest_processed_comment_id
+        )
+        if refresh_label_present:
+            await self._consume_refresh_label(repo, issue_number, registration.app_installation_id)
 
         stop_requested = self._owner_requested_stop(comments, repo.owner, record.latest_processed_comment_id)
         if stop_requested:
@@ -121,12 +122,13 @@ class WorkflowService:
             return
 
         if record.workflow_state == WorkflowState.STOPPED.value:
-            if not record.trigger_label_present and trigger_present:
+            if refresh_requested or (not record.trigger_label_present and trigger_present):
                 self.state_store.update_issue_record(
                     repo.owner_repo,
                     issue_number,
                     workflow_state=WorkflowState.NEW.value,
-                    trigger_label_present=True,
+                    trigger_label_present=trigger_present,
+                    issue_state=issue["state"],
                 )
             else:
                 self.state_store.update_issue_record(
@@ -137,7 +139,7 @@ class WorkflowService:
                 )
                 return
 
-        if not trigger_present and record.workflow_state == WorkflowState.NEW.value:
+        if not trigger_present and record.workflow_state == WorkflowState.NEW.value and not refresh_requested:
             self.state_store.update_issue_record(
                 repo.owner_repo,
                 issue_number,
@@ -146,14 +148,6 @@ class WorkflowService:
             )
             return
 
-        accepted_comments = self._accepted_comments(comments, allowed_logins)
-        latest_authorized_comment_id = max(
-            (comment.comment_id for comment in accepted_comments),
-            default=record.latest_processed_comment_id or 0,
-        )
-        refresh_requested = force_refresh or self._refresh_requested(
-            comments, allowed_logins, record.latest_processed_comment_id
-        )
         issue_changed_after_estimate = self._issue_changed_after_estimate(
             record, body_hash, latest_authorized_comment_id
         )
@@ -183,6 +177,18 @@ class WorkflowService:
             )
             return
 
+        if record.workflow_state == WorkflowState.ESTIMATED.value and not issue_changed_after_estimate and not refresh_requested:
+            self.state_store.update_issue_record(
+                repo.owner_repo,
+                issue_number,
+                issue_id=issue["id"],
+                issue_state=issue["state"],
+                workflow_state=WorkflowState.ESTIMATED.value,
+                trigger_label_present=trigger_present,
+                latest_body_hash=body_hash,
+            )
+            return
+
         repo_data = await self.github_client.get_repo(
             repo.owner, repo.repo, installation_id=registration.app_installation_id
         )
@@ -192,55 +198,74 @@ class WorkflowService:
         await self.checkout_manager.ensure_checkout(repo.owner_repo, checkout_path, base_branch, token)
         base_commit = await self.checkout_manager.current_head(checkout_path)
 
-        clarification_lines: list[str] = []
+        clarification_answers = self._merged_clarification_answers(repo.owner_repo, issue_number)
+        clarification_lines = self._clarification_prompt_lines(clarification_answers)
         active_session = self.state_store.get_active_clarification_session(repo.owner_repo, issue_number)
         clarification_answer_sources: list[dict] = []
-        clarification_answers = []
         backend = repo.agent_backend_override or self.runtime_settings.default_agent_backend
         model = repo.agent_model_override or self.runtime_settings.default_agent_model
         reasoning_effort = self.runtime_settings.default_agent_reasoning_effort
         role = repo.agent_role_override or self.runtime_settings.default_agent_role
         language = repo.agent_language_override or self.runtime_settings.default_agent_language
         if active_session:
-            clarification = await self._parse_active_clarification(
-                repo, issue_number, active_session, comments, registration.app_installation_id, allowed_logins
-            )
-            if not clarification.valid:
-                await self._set_state(
-                    repo,
-                    issue_number,
-                    WorkflowState.NEEDS_CLARIFICATION,
-                    registration.app_installation_id,
+            try:
+                clarification = await self._parse_active_clarification(
+                    repo, issue_number, active_session, comments, registration.app_installation_id, allowed_logins
                 )
-                self.state_store.update_issue_record(
+            except httpx.HTTPStatusError as exc:
+                if self._is_resource_unavailable(exc):
+                    logger.warning(
+                        "clarification comment no longer available; restarting clarification flow for %s#%s",
+                        repo.owner_repo,
+                        issue_number,
+                    )
+                    self.state_store.supersede_clarification_sessions(repo.owner_repo, issue_number)
+                    self.state_store.update_issue_record(
+                        repo.owner_repo,
+                        issue_number,
+                        issue_state=issue["state"],
+                        trigger_label_present=trigger_present,
+                        active_clarification_round=None,
+                        active_clarification_comment_id=None,
+                    )
+                    active_session = None
+                else:
+                    raise
+            if active_session is not None:
+                if not clarification.valid:
+                    await self._set_state(
+                        repo,
+                        issue_number,
+                        WorkflowState.NEEDS_CLARIFICATION,
+                        registration.app_installation_id,
+                    )
+                    self.state_store.update_issue_record(
+                        repo.owner_repo,
+                        issue_number,
+                        workflow_state=WorkflowState.NEEDS_CLARIFICATION.value,
+                        issue_state=issue["state"],
+                        trigger_label_present=trigger_present,
+                    )
+                    return
+                if not clarification.complete:
+                    await self._set_state(
+                        repo,
+                        issue_number,
+                        WorkflowState.NEEDS_CLARIFICATION,
+                        registration.app_installation_id,
+                    )
+                    return
+                clarification_answers = self._merged_clarification_answers(
                     repo.owner_repo,
                     issue_number,
-                    workflow_state=WorkflowState.NEEDS_CLARIFICATION.value,
-                    issue_state=issue["state"],
-                    trigger_label_present=trigger_present,
+                    current_session=active_session,
+                    current_answers=clarification.answers,
                 )
-                return
-            if not clarification.complete:
-                await self._set_state(
-                    repo,
-                    issue_number,
-                    WorkflowState.NEEDS_CLARIFICATION,
-                    registration.app_installation_id,
+                clarification_lines = self._clarification_prompt_lines(clarification_answers)
+                clarification_answer_sources = self._persist_clarification_answers(
+                    active_session,
+                    clarification.answers,
                 )
-                return
-            clarification_lines = clarification.as_prompt_lines()
-            clarification_answers = clarification.answers
-            clarification_answer_sources = await self._sync_clarification_summary_comment(
-                repo,
-                issue_number,
-                issue["title"],
-                issue_body,
-                active_session,
-                clarification,
-                registration.app_installation_id,
-                model,
-                reasoning_effort,
-            )
 
         agent: AgentAdapter = self.agent_factory(
             backend,
@@ -358,31 +383,71 @@ class WorkflowService:
                 continue
 
             if issue_record.workflow_state != WorkflowState.STALE.value:
-                await self._set_state(
-                    repo,
-                    issue_record.issue_number,
-                    WorkflowState.STALE,
-                    registration.app_installation_id,
-                )
-                await self.github_client.create_issue_comment(
-                    repo.owner,
-                    repo.repo,
-                    issue_record.issue_number,
-                    render_stale_comment(issue_record.base_commit_sha, current_head, matched_files),
-                    installation_id=registration.app_installation_id,
-                )
-                stale_issue = await self.github_client.get_issue(
-                    repo.owner,
-                    repo.repo,
-                    issue_record.issue_number,
-                    installation_id=registration.app_installation_id,
-                )
+                try:
+                    await self._set_state(
+                        repo,
+                        issue_record.issue_number,
+                        WorkflowState.STALE,
+                        registration.app_installation_id,
+                    )
+                    await self.github_client.create_issue_comment(
+                        repo.owner,
+                        repo.repo,
+                        issue_record.issue_number,
+                        render_stale_comment(issue_record.base_commit_sha, current_head, matched_files),
+                        installation_id=registration.app_installation_id,
+                    )
+                    stale_issue = await self.github_client.get_issue(
+                        repo.owner,
+                        repo.repo,
+                        issue_record.issue_number,
+                        installation_id=registration.app_installation_id,
+                    )
+                except httpx.HTTPStatusError as exc:
+                    if self._is_resource_unavailable(exc):
+                        self._mark_issue_unavailable(repo, issue_record.issue_number, exc.response.status_code)
+                        continue
+                    raise
+
                 await self._clear_project_estimate(repo, stale_issue, registration.app_installation_id)
                 self.state_store.update_issue_record(
                     repo.owner_repo,
                     issue_record.issue_number,
                     workflow_state=WorkflowState.STALE.value,
                 )
+
+    async def sync_priority_index_candidates(self, repo: RepoConfig) -> None:
+        if not repo.project_v2_priority_index_enabled:
+            return
+        registration = self.state_store.get_repo_registration(repo.owner_repo)
+        if registration is None or registration.app_installation_id is None:
+            return
+
+        for issue_record in self.state_store.list_estimated_issue_records(repo.owner_repo):
+            snapshot = self.state_store.get_latest_estimate(repo.owner_repo, issue_record.issue_number)
+            if snapshot is None:
+                continue
+            try:
+                issue = await self.github_client.get_issue(
+                    repo.owner,
+                    repo.repo,
+                    issue_record.issue_number,
+                    installation_id=registration.app_installation_id,
+                )
+            except httpx.HTTPStatusError as exc:
+                if self._is_resource_unavailable(exc):
+                    self._mark_issue_unavailable(repo, issue_record.issue_number, exc.response.status_code)
+                    continue
+                raise
+            await self._sync_project_priority_index(
+                repo,
+                issue,
+                registration.app_installation_id,
+                self._representative_total_impact(
+                    snapshot.lines_total_min,
+                    snapshot.lines_total_max,
+                ),
+            )
 
     async def _handle_needs_clarification(
         self,
@@ -546,63 +611,21 @@ class WorkflowService:
 
         return QuestionSpec.model_validate(data)
 
-    async def _sync_clarification_summary_comment(
+    def _persist_clarification_answers(
         self,
-        repo: RepoConfig,
-        issue_number: int,
-        issue_title: str,
-        issue_body: str,
         session: ClarificationSessionORM,
-        clarification,
-        installation_id: int,
-        model: str | None,
-        reasoning_effort: str | None,
+        current_answers: list[ClarificationAnswer],
     ) -> list[dict]:
-        summary_comment_id = self._clarification_summary_comment_id(session.answer_sources)
-        body = render_clarification_summary_comment(
-            issue_title,
-            issue_body,
-            clarification.answers,
-            model=model,
-            reasoning_effort=reasoning_effort,
-        )
-        if summary_comment_id is None:
-            comment = await self.github_client.create_issue_comment(
-                repo.owner,
-                repo.repo,
-                issue_number,
-                body,
-                installation_id=installation_id,
-            )
-            summary_comment_id = comment["id"]
-        else:
-            await self.github_client.update_issue_comment(
-                repo.owner,
-                repo.repo,
-                summary_comment_id,
-                body,
-                installation_id=installation_id,
-            )
-
         answer_sources = self._build_clarification_answer_sources(
-            clarification,
-            summary_comment_id=summary_comment_id,
+            current_answers,
+            summary_comment_id=None,
         )
         self.state_store.update_clarification_session_answer_sources(session.id, answer_sources)
         return answer_sources
 
-    def _clarification_summary_comment_id(self, answer_sources: list[dict]) -> int | None:
-        for item in answer_sources:
-            if item.get("type") != "requirements_summary_comment":
-                continue
-            comment_id = item.get("comment_id")
-            if isinstance(comment_id, int):
-                return comment_id
-        return None
-
     def _build_clarification_answer_sources(
         self,
-        clarification,
+        answers: list[ClarificationAnswer],
         *,
         summary_comment_id: int | None,
     ) -> list[dict]:
@@ -611,7 +634,7 @@ class WorkflowService:
                 "type": "clarification_answer",
                 **answer.model_dump(),
             }
-            for answer in clarification.answers
+            for answer in answers
         ]
         if summary_comment_id is not None:
             sources.append(
@@ -621,6 +644,49 @@ class WorkflowService:
                 }
             )
         return sources
+
+    def _merged_clarification_answers(
+        self,
+        owner_repo: str,
+        issue_number: int,
+        *,
+        current_session: ClarificationSessionORM | None = None,
+        current_answers: list[ClarificationAnswer] | None = None,
+    ) -> list[ClarificationAnswer]:
+        merged_by_key: dict[str, ClarificationAnswer] = {}
+        ordered_keys: list[str] = []
+        sessions = self.state_store.list_clarification_sessions_for_issue(owner_repo, issue_number)
+
+        for session in sessions:
+            if current_session is not None and current_answers is not None and session.id == current_session.id:
+                answers = current_answers
+            else:
+                answers = self._clarification_answers_from_sources(session.answer_sources)
+            for answer in answers:
+                merge_key = answer.slot or answer.question_id
+                if merge_key not in merged_by_key:
+                    ordered_keys.append(merge_key)
+                merged_by_key[merge_key] = answer
+
+        return [merged_by_key[key] for key in ordered_keys]
+
+    def _clarification_answers_from_sources(self, answer_sources: list[dict]) -> list[ClarificationAnswer]:
+        answers: list[ClarificationAnswer] = []
+        for item in answer_sources:
+            if item.get("type") != "clarification_answer":
+                continue
+            try:
+                answers.append(
+                    ClarificationAnswer.model_validate(
+                        {key: value for key, value in item.items() if key != "type"}
+                    )
+                )
+            except ValidationError:
+                logger.warning("failed to parse clarification answer source: %s", item)
+        return answers
+
+    def _clarification_prompt_lines(self, answers: list[ClarificationAnswer]) -> list[str]:
+        return [answer.as_prompt_line() for answer in answers]
 
     def _accepted_comments(
         self, issue_comments: list[dict], allowed_logins: set[str]
@@ -667,6 +733,25 @@ class WorkflowService:
             if (item.get("body") or "").strip().lower().startswith("/refresh"):
                 return True
         return False
+
+    async def _consume_refresh_label(
+        self,
+        repo: RepoConfig,
+        issue_number: int,
+        installation_id: int,
+    ) -> None:
+        try:
+            await self.github_client.remove_label_from_issue(
+                repo.owner,
+                repo.repo,
+                issue_number,
+                REFRESH_LABEL,
+                installation_id=installation_id,
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return
+            raise
 
     def _issue_changed_after_estimate(
         self, record: IssueRecordORM, latest_body_hash: str, latest_authorized_comment_id: int
@@ -723,6 +808,28 @@ class WorkflowService:
                 exc_info=True,
             )
 
+    async def _sync_project_priority_index(
+        self,
+        repo: RepoConfig,
+        issue: dict,
+        installation_id: int,
+        total_impact: float,
+    ) -> None:
+        try:
+            await self.project_metadata_service.sync_priority_index(
+                repo,
+                issue,
+                installation_id,
+                total_impact,
+            )
+        except Exception:
+            logger.warning(
+                "failed to sync GitHub Project priority index for %s#%s",
+                repo.owner_repo,
+                issue["number"],
+                exc_info=True,
+            )
+
     async def _clear_project_estimate(
         self,
         repo: RepoConfig,
@@ -738,3 +845,25 @@ class WorkflowService:
                 issue["number"],
                 exc_info=True,
             )
+
+    def _is_resource_unavailable(self, exc: httpx.HTTPStatusError) -> bool:
+        return exc.response.status_code in (404, 410)
+
+    def _representative_total_impact(self, minimum: int, maximum: int) -> float:
+        return float((minimum + maximum + 1) // 2)
+
+    def _mark_issue_unavailable(self, repo: RepoConfig, issue_number: int, status_code: int) -> None:
+        logger.warning(
+            "issue no longer available; skipping %s#%s with status %s",
+            repo.owner_repo,
+            issue_number,
+            status_code,
+        )
+        self.state_store.supersede_clarification_sessions(repo.owner_repo, issue_number)
+        self.state_store.update_issue_record(
+            repo.owner_repo,
+            issue_number,
+            issue_state="gone",
+            active_clarification_round=None,
+            active_clarification_comment_id=None,
+        )

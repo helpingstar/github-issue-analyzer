@@ -19,6 +19,13 @@ class ProjectFieldReference:
 
 
 @dataclass(frozen=True)
+class ProjectFieldBundle:
+    impact: ProjectFieldReference
+    priority: ProjectFieldReference | None = None
+    priority_index: ProjectFieldReference | None = None
+
+
+@dataclass(frozen=True)
 class ProjectLocator:
     owner_type: Literal["orgs", "users"]
     owner_login: str
@@ -33,7 +40,7 @@ class ProjectMetadataService:
     ) -> None:
         self.github_client = github_client
         self.personal_project_client = personal_project_client
-        self._field_cache: dict[tuple[str, str, str], ProjectFieldReference] = {}
+        self._field_cache: dict[tuple[str, str, tuple[str, ...]], ProjectFieldBundle] = {}
 
     async def validate_repo_config(
         self,
@@ -43,11 +50,11 @@ class ProjectMetadataService:
     ) -> None:
         if not repo.project_v2_enabled:
             return
-        reference = await self._resolve_project_field(repo, installation_id)
+        reference = await self._resolve_project_fields(repo, installation_id)
         if repository_node_id:
             await self._ensure_repository_link(
                 repo,
-                reference,
+                reference.impact,
                 repository_node_id,
                 installation_id,
             )
@@ -65,16 +72,24 @@ class ProjectMetadataService:
         if not issue_node_id:
             raise RuntimeError(f"Issue node_id is missing for {repo.owner_repo}#{issue['number']}")
 
-        reference = await self._resolve_project_field(repo, installation_id)
-        item_id = await self._get_project_item_id(repo, issue_node_id, reference, installation_id)
+        total_impact = float(estimate.representative_total_impact())
+        reference = await self._resolve_project_fields(repo, installation_id)
+        item_id = await self._get_project_item_id(repo, issue_node_id, reference.impact, installation_id)
         if item_id is None:
-            item_id = await self._add_issue_to_project(repo, issue_node_id, reference, installation_id)
+            item_id = await self._add_issue_to_project(repo, issue_node_id, reference.impact, installation_id)
 
         await self._update_number_field(
             repo,
+            reference.impact,
+            item_id,
+            total_impact,
+            installation_id,
+        )
+        await self._sync_priority_index_for_item(
+            repo,
             reference,
             item_id,
-            float(estimate.representative_total_impact()),
+            total_impact,
             installation_id,
         )
 
@@ -85,23 +100,50 @@ class ProjectMetadataService:
         if not issue_node_id:
             raise RuntimeError(f"Issue node_id is missing for {repo.owner_repo}#{issue['number']}")
 
-        reference = await self._resolve_project_field(repo, installation_id)
-        item_id = await self._get_project_item_id(repo, issue_node_id, reference, installation_id)
+        reference = await self._resolve_project_fields(repo, installation_id)
+        item_id = await self._get_project_item_id(repo, issue_node_id, reference.impact, installation_id)
         if item_id is None:
             return
 
-        await self._clear_field(repo, reference, item_id, installation_id)
+        await self._clear_field(repo, reference.impact, item_id, installation_id)
+        if reference.priority_index is not None:
+            await self._clear_field(repo, reference.priority_index, item_id, installation_id)
 
-    async def _resolve_project_field(
+    async def sync_priority_index(
+        self,
+        repo: RepoConfig,
+        issue: dict,
+        installation_id: int,
+        total_impact: float,
+    ) -> None:
+        if not repo.project_v2_priority_index_enabled:
+            return
+        issue_node_id = issue.get("node_id")
+        if not issue_node_id:
+            raise RuntimeError(f"Issue node_id is missing for {repo.owner_repo}#{issue['number']}")
+
+        reference = await self._resolve_project_fields(repo, installation_id)
+        item_id = await self._get_project_item_id(repo, issue_node_id, reference.impact, installation_id)
+        if item_id is None:
+            return
+        await self._sync_priority_index_for_item(
+            repo,
+            reference,
+            item_id,
+            total_impact,
+            installation_id,
+        )
+
+    async def _resolve_project_fields(
         self,
         repo: RepoConfig,
         installation_id: int,
-    ) -> ProjectFieldReference:
+    ) -> ProjectFieldBundle:
         assert repo.project_v2_impact_field_name is not None
 
         project_key = repo.resolved_project_v2_title or repo.project_v2_url
         assert project_key is not None
-        cache_key = (repo.owner_repo, project_key, repo.project_v2_impact_field_name)
+        cache_key = (repo.owner_repo, project_key, tuple(self._required_field_names(repo)))
         cached = self._field_cache.get(cache_key)
         if cached is not None:
             return cached
@@ -125,11 +167,11 @@ class ProjectMetadataService:
             locator.project_number,
             installation_id=installation_id,
         )
-        reference = self._build_reference_from_project(project, repo.project_v2_impact_field_name, "app")
+        reference = self._build_bundle_from_project(project, repo, "app")
         self._field_cache[cache_key] = reference
         return reference
 
-    async def _resolve_personal_project_by_title(self, repo: RepoConfig) -> ProjectFieldReference:
+    async def _resolve_personal_project_by_title(self, repo: RepoConfig) -> ProjectFieldBundle:
         project_title = repo.resolved_project_v2_title
         assert project_title is not None
         client = self._require_personal_client()
@@ -140,44 +182,90 @@ class ProjectMetadataService:
             created = await client.create_viewer_project(project_title)
             viewer = await client.get_viewer()
             project = await client.get_user_project_by_number(viewer["login"], int(created["number"]))
-        return await self._ensure_personal_project_field(repo, project)
+        return await self._ensure_personal_project_fields(repo, project)
 
     async def _resolve_personal_project_by_locator(
         self,
         repo: RepoConfig,
         locator: ProjectLocator,
-    ) -> ProjectFieldReference:
+    ) -> ProjectFieldBundle:
         client = self._require_personal_client()
         project = await client.get_user_project_by_number(locator.owner_login, locator.project_number)
         if project is None:
             raise RuntimeError(
                 f"GitHub personal Project not found or not accessible: {locator.owner_login}#{locator.project_number}"
             )
-        return await self._ensure_personal_project_field(repo, project)
+        return await self._ensure_personal_project_fields(repo, project)
 
-    async def _ensure_personal_project_field(
+    async def _ensure_personal_project_fields(
         self,
         repo: RepoConfig,
         project: dict | None,
-    ) -> ProjectFieldReference:
+    ) -> ProjectFieldBundle:
         client = self._require_personal_client()
         if not project:
             raise RuntimeError("GitHub personal Project lookup returned no project")
-        field_name = repo.project_v2_impact_field_name
-        assert field_name is not None
-        try:
-            return self._build_reference_from_project(project, field_name, "personal")
-        except RuntimeError as exc:
-            if "not found" not in str(exc) or not repo.project_v2_create_if_missing:
-                raise
-            await client.create_number_field(project["id"], field_name)
+        missing_field_names = self._missing_or_invalid_number_field_names(project, repo)
+        if missing_field_names:
+            if not repo.project_v2_create_if_missing:
+                return self._build_bundle_from_project(project, repo, "personal")
+            for field_name in missing_field_names:
+                await client.create_number_field(project["id"], field_name)
             viewer = await client.get_viewer()
             refreshed = await client.get_user_project_by_number(viewer["login"], int(project["number"]))
             if refreshed is None:
                 raise RuntimeError(
                     f"GitHub personal Project '{project['title']}' could not be refreshed after field creation"
                 )
-            return self._build_reference_from_project(refreshed, field_name, "personal")
+            return self._build_bundle_from_project(refreshed, repo, "personal")
+        return self._build_bundle_from_project(project, repo, "personal")
+
+    def _required_field_names(self, repo: RepoConfig) -> list[str]:
+        assert repo.project_v2_impact_field_name is not None
+        names = [repo.project_v2_impact_field_name]
+        for field_name in (repo.project_v2_priority_field_name, repo.project_v2_priority_index_field_name):
+            if field_name and field_name not in names:
+                names.append(field_name)
+        return names
+
+    def _missing_or_invalid_number_field_names(self, project: dict, repo: RepoConfig) -> list[str]:
+        fields_by_name = {
+            field.get("name"): field
+            for field in (project.get("fields") or {}).get("nodes") or []
+            if field and field.get("name")
+        }
+        missing: list[str] = []
+        for field_name in self._required_field_names(repo):
+            field = fields_by_name.get(field_name)
+            if field is None:
+                missing.append(field_name)
+                continue
+            if field.get("dataType") != "NUMBER":
+                raise RuntimeError(
+                    f"GitHub Project field '{field_name}' must be a number field"
+                )
+        return missing
+
+    def _build_bundle_from_project(
+        self,
+        project: dict,
+        repo: RepoConfig,
+        transport: Literal["app", "personal"],
+    ) -> ProjectFieldBundle:
+        assert repo.project_v2_impact_field_name is not None
+        return ProjectFieldBundle(
+            impact=self._build_reference_from_project(project, repo.project_v2_impact_field_name, transport),
+            priority=(
+                self._build_reference_from_project(project, repo.project_v2_priority_field_name, transport)
+                if repo.project_v2_priority_field_name
+                else None
+            ),
+            priority_index=(
+                self._build_reference_from_project(project, repo.project_v2_priority_index_field_name, transport)
+                if repo.project_v2_priority_index_field_name
+                else None
+            ),
+        )
 
     def _build_reference_from_project(
         self,
@@ -308,6 +396,24 @@ class ProjectMetadataService:
             installation_id=installation_id,
         )
 
+    async def _get_number_field_value(
+        self,
+        repo: RepoConfig,
+        reference: ProjectFieldReference,
+        item_id: str,
+        installation_id: int,
+    ) -> float | None:
+        if reference.transport == "personal":
+            client = self._require_personal_client()
+            return await client.get_project_v2_item_number_field_value(item_id, reference.field_name)
+        return await self.github_client.get_project_v2_item_number_field_value(
+            repo.owner,
+            repo.repo,
+            item_id,
+            reference.field_name,
+            installation_id=installation_id,
+        )
+
     async def _clear_field(
         self,
         repo: RepoConfig,
@@ -326,4 +432,31 @@ class ProjectMetadataService:
             item_id,
             reference.field_id,
             installation_id=installation_id,
+        )
+
+    async def _sync_priority_index_for_item(
+        self,
+        repo: RepoConfig,
+        reference: ProjectFieldBundle,
+        item_id: str,
+        total_impact: float,
+        installation_id: int,
+    ) -> None:
+        if reference.priority is None or reference.priority_index is None:
+            return
+        priority_value = await self._get_number_field_value(
+            repo,
+            reference.priority,
+            item_id,
+            installation_id,
+        )
+        if priority_value is None:
+            await self._clear_field(repo, reference.priority_index, item_id, installation_id)
+            return
+        await self._update_number_field(
+            repo,
+            reference.priority_index,
+            item_id,
+            priority_value * total_impact,
+            installation_id,
         )
