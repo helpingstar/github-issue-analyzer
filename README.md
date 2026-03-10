@@ -84,6 +84,14 @@ uv run your-issue-is-unclear ui
 - `GIA_DEFAULT_AGENT_LANGUAGE` (optional)
 - `GIA_LOG_LEVEL` (optional)
 
+## Logs
+
+- logs are still emitted to stdout
+- logs are also written to `app.log` under `GIA_LOG_ROOT`
+- if `GIA_LOG_ROOT` is unset, the default OS log directory from `platformdirs` is used
+- log files rotate at midnight UTC and keep 7 backups
+- uncaught command failures and HTTP status details are recorded in the log file
+
 ## CLI
 
 ```bash

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import shlex
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -17,7 +19,7 @@ from github_issue_analyzer.db import StateStore
 from github_issue_analyzer.github.auth import GitHubAppAuth
 from github_issue_analyzer.github.client import GitHubClient
 from github_issue_analyzer.github.personal_project_client import PersonalProjectClient
-from github_issue_analyzer.logging import configure_logging
+from github_issue_analyzer.logging import configure_logging, log_exception_details
 from github_issue_analyzer.paths import APP_NAME, AppPaths
 from github_issue_analyzer.services.bootstrap import BootstrapService
 from github_issue_analyzer.services.checkout import CheckoutManager
@@ -28,6 +30,7 @@ from github_issue_analyzer.workflow.service import WorkflowService
 
 
 app = typer.Typer(help=BOT_NAME)
+logger = logging.getLogger(__name__)
 
 
 UiCommandName = Literal["bootstrap", "worker", "refresh"]
@@ -54,7 +57,7 @@ def _default_config_path() -> Path:
 def _build_dependencies(config_path: Path):
     project_root = _project_root()
     file_config, runtime, paths = load_configuration(project_root, config_path)
-    configure_logging(runtime.log_level)
+    configure_logging(runtime.log_level, paths.log_root)
 
     state_store = StateStore(paths.db_path)
     state_store.create_all()
@@ -184,15 +187,32 @@ async def _run_refresh(owner_repo: str, issue_number: int, config_path: Path) ->
 
 
 def _run_bootstrap_sync(owner_repo: str | None, config_path: Path) -> None:
-    asyncio.run(_run_bootstrap(owner_repo, config_path))
+    _run_with_exception_logging(
+        "bootstrap",
+        lambda: asyncio.run(_run_bootstrap(owner_repo, config_path)),
+    )
 
 
 def _run_worker_sync(once: bool, config_path: Path) -> None:
-    asyncio.run(_run_worker(once, config_path))
+    _run_with_exception_logging(
+        "worker",
+        lambda: asyncio.run(_run_worker(once, config_path)),
+    )
 
 
 def _run_refresh_sync(owner_repo: str, issue_number: int, config_path: Path) -> None:
-    asyncio.run(_run_refresh(owner_repo, issue_number, config_path))
+    _run_with_exception_logging(
+        "refresh",
+        lambda: asyncio.run(_run_refresh(owner_repo, issue_number, config_path)),
+    )
+
+
+def _run_with_exception_logging(command_name: str, action: Callable[[], None]) -> None:
+    try:
+        action()
+    except Exception as exc:
+        log_exception_details(logger, f"{command_name} command failed", exc)
+        raise
 
 
 def _choose_index(console: Console, title: str, options: list[str], *, prompt: str = "Select an option") -> int:
